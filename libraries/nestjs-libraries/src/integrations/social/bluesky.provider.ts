@@ -29,6 +29,7 @@ import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
 import { timer } from '@gitroom/helpers/utils/timer';
 import axios from 'axios';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
+import { toShortBlueskyUrl } from '@gitroom/helpers/utils/count.length';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 
@@ -155,6 +156,63 @@ async function uploadVideo(
     $type: 'app.bsky.embed.video',
     video: blob,
   } satisfies AppBskyEmbedVideo.Main;
+}
+
+const BLUESKY_LINK_FACET = 'app.bsky.richtext.facet#link';
+
+// Show links the way the bsky.app client does: a short display text that still
+// links to the full URL. Facet indices are UTF-8 byte offsets, so we rebuild the
+// text and every facet's offsets after swapping each bare URL for its short form.
+// Mentions and labelled links (display text that is not the raw URL) stay untouched.
+function shortenBlueskyLinks(rt: RichText): {
+  text: string;
+  facets: RichText['facets'];
+} {
+  const facets = rt.facets || [];
+  if (!facets.length) {
+    return { text: rt.text, facets };
+  }
+
+  const source = Buffer.from(rt.text, 'utf8');
+  const ordered = [...facets].sort(
+    (a, b) => a.index.byteStart - b.index.byteStart
+  );
+
+  const parts: Buffer[] = [];
+  const newFacets: NonNullable<RichText['facets']> = [];
+  let cursor = 0;
+  let length = 0;
+
+  for (const facet of ordered) {
+    const { byteStart, byteEnd } = facet.index;
+    const gap = source.subarray(cursor, byteStart);
+    parts.push(gap);
+    length += gap.length;
+
+    const original = source.subarray(byteStart, byteEnd).toString('utf8');
+    const link = facet.features.find(
+      (f: any) => f.$type === BLUESKY_LINK_FACET
+    ) as { uri?: string } | undefined;
+
+    const display =
+      link && original.startsWith('http')
+        ? toShortBlueskyUrl(link.uri || original)
+        : original;
+
+    const displayBuffer = Buffer.from(display, 'utf8');
+    const newStart = length;
+    parts.push(displayBuffer);
+    length += displayBuffer.length;
+
+    newFacets.push({
+      ...facet,
+      index: { byteStart: newStart, byteEnd: length },
+    });
+    cursor = byteEnd;
+  }
+
+  parts.push(source.subarray(cursor));
+  return { text: Buffer.concat(parts).toString('utf8'), facets: newFacets };
 }
 
 @Rules(
@@ -370,11 +428,12 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
     });
 
     await rt.detectFacets(agent);
+    const shortened = shortenBlueskyLinks(rt);
 
     // @ts-ignore
     const { cid, uri, commit } = await agent.post({
-      text: rt.text,
-      facets: rt.facets,
+      text: shortened.text,
+      facets: shortened.facets,
       createdAt: new Date().toISOString(),
       ...(Object.keys(embed).length > 0 ? { embed } : {}),
     });
@@ -407,6 +466,7 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
     });
 
     await rt.detectFacets(agent);
+    const shortened = shortenBlueskyLinks(rt);
 
     // Get the parent post info to get its CID
     const parentUri = lastCommentId || postId;
@@ -426,8 +486,8 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
 
     // @ts-ignore
     const { cid, uri, commit } = await agent.post({
-      text: rt.text,
-      facets: rt.facets,
+      text: shortened.text,
+      facets: shortened.facets,
       createdAt: new Date().toISOString(),
       ...(Object.keys(embed).length > 0 ? { embed } : {}),
       reply: {
@@ -598,10 +658,12 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
       const rt = new RichText({
         text: stripHtmlValidation('normal', fields.post, true),
       });
+      await rt.detectFacets(agent);
+      const shortened = shortenBlueskyLinks(rt);
 
       await agent.post({
-        text: rt.text,
-        facets: rt.facets,
+        text: shortened.text,
+        facets: shortened.facets,
         createdAt: new Date().toISOString(),
         reply: {
           root: {
