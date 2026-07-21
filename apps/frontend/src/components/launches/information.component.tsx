@@ -8,6 +8,7 @@ import SafeImage from '@gitroom/react/helpers/safe.image';
 import { capitalize } from 'lodash';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { hasLinks } from '@gitroom/helpers/utils/strip.links';
+import { countCharacters } from '@gitroom/helpers/utils/count.length';
 
 const Valid: FC = () => {
   return (
@@ -75,6 +76,22 @@ export const InformationComponent: FC<{
       }))
     );
 
+  // In global mode one text is checked against many platforms, and each counts links
+  // differently. Recompute the effective length per platform so the check is right.
+  const charsForIntegration = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (isGlobal) {
+      for (const p of selectedIntegrations) {
+        map[p.integration.id] = countCharacters(
+          p.integration.identifier,
+          text || ''
+        );
+      }
+    }
+    return (id: string, identifier: string) =>
+      isGlobal ? map[id] ?? countCharacters(identifier, text || '') : totalChars;
+  }, [isGlobal, selectedIntegrations, text, totalChars]);
+
   const stripLinkNames = useMemo(() => {
     if (!hasLinks(text)) {
       return [] as string[];
@@ -127,7 +144,10 @@ export const InformationComponent: FC<{
           return false;
         }
 
-        return totalChars > (chars?.[p.integration.id] || 0);
+        return (
+          charsForIntegration(p.integration.id, p.integration.identifier) >
+          (chars?.[p.integration.id] || 0)
+        );
       })
     ) {
       return false;
@@ -141,6 +161,8 @@ export const InformationComponent: FC<{
     isPicture,
     chars,
     showStripLinkWarning,
+    charsForIntegration,
+    selectedIntegrations,
   ]);
 
   const globalDisplayLimit = useMemo(() => {
@@ -237,7 +259,10 @@ export const InformationComponent: FC<{
                       'whitespace-nowrap',
                       isInternal?.[index]
                         ? ''
-                        : totalChars > (chars?.[p.integration.id] || 0)
+                        : charsForIntegration(
+                            p.integration.id,
+                            p.integration.identifier
+                          ) > (chars?.[p.integration.id] || 0)
                         ? 'text-[#FF3F3F]'
                         : ''
                     )}
@@ -250,14 +275,20 @@ export const InformationComponent: FC<{
                       'whitespace-nowrap',
                       isInternal?.[index]
                         ? ''
-                        : totalChars > (chars?.[p.integration.id] || 0)
+                        : charsForIntegration(
+                            p.integration.id,
+                            p.integration.identifier
+                          ) > (chars?.[p.integration.id] || 0)
                         ? 'text-[#FF3F3F]'
                         : ''
                     )}
                   >
                     {isInternal?.[index]
                       ? t('internal_edit', 'Internal Edit')
-                      : `${totalChars}/${chars?.[p.integration.id] || 0}`}
+                      : `${charsForIntegration(
+                          p.integration.id,
+                          p.integration.identifier
+                        )}/${chars?.[p.integration.id] || 0}`}
                   </div>
                 </Fragment>
               ))}

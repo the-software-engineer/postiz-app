@@ -46,6 +46,7 @@ import Text from '@tiptap/extension-text';
 import Paragraph from '@tiptap/extension-paragraph';
 import Underline from '@tiptap/extension-underline';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
+import { countCharacters } from '@gitroom/helpers/utils/count.length';
 import { History } from '@tiptap/extension-history';
 import { BulletList, ListItem } from '@tiptap/extension-list';
 import { Bullets } from '@gitroom/frontend/components/new-launch/bullets.component';
@@ -770,7 +771,10 @@ export const Editor: FC<{
                     <InformationComponent
                       isPicture={pictures?.length > 0}
                       chars={chars}
-                      totalChars={valueWithoutHtml.length}
+                      totalChars={countCharacters(
+                        identifier || '',
+                        valueWithoutHtml
+                      )}
                       totalAllowedChars={props.totalChars}
                       text={valueWithoutHtml}
                     />
