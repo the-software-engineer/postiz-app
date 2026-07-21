@@ -417,7 +417,7 @@ export class LinkedinPageProvider
     }));
   }
 
-  async postAnalytics(
+  override async postAnalytics(
     integrationId: string,
     accessToken: string,
     postId: string,

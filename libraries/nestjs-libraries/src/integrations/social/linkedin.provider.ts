@@ -1,10 +1,12 @@
 import {
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
+import dayjs from 'dayjs';
 import sharp from 'sharp';
 import { lookup } from 'mime-types';
 import { readOrFetch } from '@gitroom/helpers/utils/read.or.fetch';
@@ -978,5 +980,85 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
 
   mentionFormat(idOrHandle: string, name: string) {
     return `@[${name.replace('@', '')}](urn:li:organization:${idOrHandle})`;
+  }
+
+  // LinkedIn has no official API for member (personal profile) post analytics,
+  // so this reads LinkedIn's internal Voyager endpoint with a copied browser
+  // session cookie. It is unofficial, breaks LinkedIn's ToS, and can stop
+  // working without notice if LinkedIn changes the endpoint or challenges the
+  // session. It is OFF unless LINKEDIN_LI_AT and LINKEDIN_JSESSIONID are set,
+  // and every failure path returns [] so post scheduling is never affected.
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const liAt = process.env.LINKEDIN_LI_AT;
+    const jsessionId = process.env.LINKEDIN_JSESSIONID;
+
+    // Feature flag: no session cookie means the scraper stays off.
+    if (!liAt || !jsessionId) {
+      return [];
+    }
+
+    try {
+      // csrf-token must equal the JSESSIONID value with its quotes stripped.
+      const csrfToken = jsessionId.replace(/"/g, '');
+      const response = await fetch(
+        `https://www.linkedin.com/voyager/api/feed/socialActivityCounts/${encodeURIComponent(
+          postId
+        )}`,
+        {
+          headers: {
+            cookie: `li_at=${liAt}; JSESSIONID="${csrfToken}"`,
+            'csrf-token': csrfToken,
+            'x-restli-protocol-version': '2.0.0',
+            accept: 'application/json',
+            'x-li-lang': 'en_US',
+            'user-agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          },
+        }
+      );
+
+      if (response.status !== 200) {
+        console.warn(
+          `LinkedIn member post analytics: unexpected status ${response.status} for ${postId}`
+        );
+        return [];
+      }
+
+      const counts = await response.json();
+      const social = counts?.data ?? counts;
+      if (!social || typeof social !== 'object') {
+        return [];
+      }
+
+      const reactions =
+        typeof social.numLikes === 'number'
+          ? social.numLikes
+          : (social.reactionTypeCounts || []).reduce(
+              (sum: number, r: { count?: number }) => sum + (r?.count || 0),
+              0
+            );
+      const comments = social.numComments || 0;
+      const reposts = social.numShares || 0;
+
+      const today = dayjs().format('YYYY-MM-DD');
+      return [
+        { label: 'Reactions', total: reactions },
+        { label: 'Comments', total: comments },
+        { label: 'Reposts', total: reposts },
+      ].map(({ label, total }) => ({
+        label,
+        data: [{ total: String(total), date: today }],
+        percentageChange: 0,
+      }));
+    } catch (e) {
+      // Never let a scraping error reach the posting or analytics-refresh path.
+      console.warn('LinkedIn member post analytics scrape failed', e);
+      return [];
+    }
   }
 }
