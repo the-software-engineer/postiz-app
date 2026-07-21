@@ -1,4 +1,5 @@
 import {
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
@@ -426,6 +427,46 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
         releaseURL: `https://bsky.app/profile/${id}/post/${uri.split('/').pop()}`,
       },
     ];
+  }
+
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const today = dayjs().format('YYYY-MM-DD');
+
+    // Bluesky has no impressions/views API; the appview serves the public
+    // engagement counts unauthenticated, so no session is needed here.
+    const agent = new AtpAgent({ service: 'https://public.api.bsky.app' });
+
+    try {
+      // The stored post id is already the AT URI returned by post().
+      const { data } = await agent.app.bsky.feed.getPosts({ uris: [postId] });
+      const post = data.posts?.[0];
+      if (!post) {
+        return [];
+      }
+
+      const metrics: Array<{ label: string; value?: number }> = [
+        { label: 'Likes', value: post.likeCount },
+        { label: 'Reposts', value: post.repostCount },
+        { label: 'Replies', value: post.replyCount },
+        { label: 'Quotes', value: post.quoteCount },
+      ];
+
+      return metrics
+        .filter((m) => m.value !== undefined)
+        .map((m) => ({
+          label: m.label,
+          percentageChange: 0,
+          data: [{ total: String(m.value), date: today }],
+        }));
+    } catch (err) {
+      console.error('Error fetching Bluesky post analytics:', err);
+      return [];
+    }
   }
 
   @Plug({
