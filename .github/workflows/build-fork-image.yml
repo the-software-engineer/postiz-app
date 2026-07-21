@@ -1,0 +1,115 @@
+---
+# Build the TSE fork image and publish it to GitHub Container Registry.
+#
+# This is separate from upstream's build-containers.yml on purpose. Upstream
+# builds amd64 + arm64 and stitches a multi-arch manifest. We only run on
+# arm64 (m1srv is Apple Silicon), so we build arm64 only. That halves build
+# cost and storage.
+#
+# Tag scheme
+# ----------
+# Fork tags look like  v<upstream-version>-tse.<n>  e.g. v2.21.10-tse.1
+#   - v2.21.10 is the upstream base we forked from.
+#   - tse.<n> is our fork build number. Bump it (tse.2, tse.3, ...) each time
+#     we cut a new fork image off the same or a newer upstream base.
+# Pushing such a tag publishes two image tags to ghcr:
+#   - ghcr.io/the-software-engineer/postiz-app:v2.21.10-tse.1   (immutable, pinnable)
+#   - ghcr.io/the-software-engineer/postiz-app:latest           (moves to newest build)
+#
+# Storage cap
+# -----------
+# Each build adds a fresh ~1GB app layer that does not dedupe against older
+# builds (base node + apt layers do dedupe). Two builds already sit near the
+# 2GB ghcr cap, so the prune step keeps only the 2 most recent versions
+# (latest + one rollback) and deletes the rest.
+
+name: Build fork image (arm64 -> ghcr)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Fork version tag to build, e.g. v2.21.10-tse.1"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*-tse.*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/the-software-engineer/postiz-app
+
+jobs:
+  build:
+    # Native arm64 runner. No QEMU emulation.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="manual-$(echo "${{ github.sha }}" | cut -c1-7)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push image
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          docker buildx build --platform linux/arm64 \
+            -f Dockerfile.dev \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            --build-arg NEXT_PUBLIC_VERSION="${VERSION}" \
+            --pull \
+            --no-cache \
+            --provenance=false --sbom=false \
+            --push .
+
+      - name: Show published size
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          echo "Published ${IMAGE}:${VERSION} and ${IMAGE}:latest"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+  prune:
+    # Keep only the 2 newest package versions (latest + one rollback) so the
+    # ghcr package stays under the 2GB cap. The newest version is the build we
+    # just pushed; :latest points at it, so it is never a delete candidate.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Delete old package versions
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: the-software-engineer
+          package-name: postiz-app
+          package-type: container
+          min-versions-to-keep: 2
