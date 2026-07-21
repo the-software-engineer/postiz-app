@@ -9,6 +9,9 @@ on:
 
 jobs:
   build-containers-common:
+    # Only run on the upstream repo. On the TSE fork we build via
+    # build-fork-image.yml instead, so this must not fire on our fork tags.
+    if: github.repository == 'gitroomhq/postiz-app'
     runs-on: ubuntu-latest
     outputs:
       containerver: ${{ steps.getcontainerver.outputs.containerver }}
@@ -20,6 +23,7 @@ jobs:
 
   build-containers:
     needs: build-containers-common
+    if: github.repository == 'gitroomhq/postiz-app'
     strategy:
       matrix:
         include:
@@ -60,6 +64,7 @@ jobs:
 
   build-container-manifest:
     needs: [build-containers, build-containers-common]
+    if: github.repository == 'gitroomhq/postiz-app'
     runs-on: ubuntu-latest
     steps:
       - name: Login to ghcr
