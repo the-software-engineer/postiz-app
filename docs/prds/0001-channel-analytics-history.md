@@ -10,8 +10,9 @@ The analytics tab exists to answer one question: is a channel growing? A
 trend line answers it, a single number does not. For the channels this
 instance posts to (X, Threads, Bluesky, LinkedIn personal), the platform APIs
 return no usable history: ask today and you get today's totals, nothing
-behind them. (Threads offers a views time series but nothing else; LinkedIn
-has a follower-count API but it sits behind a partner-only permission that
+behind them. (Threads views is the one exception, a real per-day series the
+tab already draws; every other Threads metric is a range total. LinkedIn has
+a follower-count API but it sits behind a partner-only permission that
 self-serve apps cannot get.) A number that is not written down when it is
 current is gone. So the system records channel metrics every day, and the
 tab draws its lines from those records. History exists from the first
@@ -26,15 +27,17 @@ platform (repo rule).
 
 - **daily**: the platform API returns one value per calendar day (Facebook,
   LinkedIn Page, Pinterest, YouTube, GMB, Instagram follower_count and
-  reach). Served straight from the API, as today.
+  reach, Threads views: the one Threads metric Meta serves as a time
+  series, and this code path already receives it). Served straight from the
+  API, as today.
 - **lifetime**: a counter over the whole account life (TikTok follower,
   following, likes, video counts; X profile counts; Bluesky follower count
   when it lands). Recorded once a day. The tab draws the recorded series, and
   the percentage change is the real change across the visible range.
 - **windowed**: one aggregate over the requested range, such as "likes on
   posts in the last 7 days" (X engagement totals, Instagram total_value
-  metrics, all Threads metrics: the Threads API returns every metric as a
-  single total over the range, views included on this code path). Recorded
+  metrics, Threads likes, replies, reposts, and quotes: each comes back as
+  one total over the range, only views gets a series). Recorded
   once a day per window the tab offers. The tab draws the rolling value over
   time: a window-7 series shows trailing-7-day engagement, day by day.
   Windowed values are never subtracted from each other; the difference of
