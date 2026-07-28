@@ -116,7 +116,11 @@ Recorder rules:
   the percentage change cover the stored span only; a 30 day request two
   days after launch shows a 2 day line, honestly.
 - Aggregation follows the class. Daily series sum (a sum of per-day values
-  is a real total). Lifetime, windowed, and recent-content series aggregate
+  is a real total), except metrics flagged average, which average: YouTube's
+  average view duration and percentage carry that flag today, the card
+  headline respects it, and the chart's bucket merge sums them anyway, a
+  standing bug this rule closes. Lifetime, windowed, and recent-content
+  series aggregate
   by last value everywhere a series is collapsed: the chart's bucket
   merging and the card headline both currently sum, which would show 30
   snapshots of a follower count as roughly 30 times the followers. Snapshots
