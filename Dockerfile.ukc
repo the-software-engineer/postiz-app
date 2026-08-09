@@ -37,6 +37,10 @@ RUN apt-get purge -y g++ make python3-pip \
 # the initrd must stay small because it loads into guest RAM.
 RUN rm -rf /app/node_modules && mkdir /app/node_modules
 
+# socat tunnels plaintext gRPC (h2c) out to temporal's TLS service: the LB
+# terminates TLS but offers no h2 ALPN, which the temporal SDK client insists on.
+RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf /var/lib/apt/lists/*
+
 # Launcher lives here, not in the build context: editing it must not invalidate
 # the COPY layer above. ROM with node_modules attaches as /dev/ukp_rom1.
-RUN printf '#!/bin/sh\nset -e\nmount -t erofs -o ro /dev/ukp_rom1 /app/node_modules\ncd /app\nnginx\nexec pnpm run pm2\n' > /ukc-launch.sh && chmod 755 /ukc-launch.sh
+RUN printf '#!/bin/sh\nset -e\nmount -t erofs -o ro /dev/ukp_rom1 /app/node_modules\nsocat TCP-LISTEN:7233,bind=127.0.0.1,fork,reuseaddr OPENSSL:postiz-temporal.sfo.unikraft.app:7233,verify=0 &\ncd /app\nnginx\nexec pnpm run pm2\n' > /ukc-launch.sh && chmod 755 /ukc-launch.sh
