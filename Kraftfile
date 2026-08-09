@@ -7,4 +7,4 @@ runtime: base-compat:latest
 rootfs: ./Dockerfile.ukc
 
 # Mirrors Dockerfile.dev CMD: nginx on 5000 fronting the pm2-supervised apps.
-cmd: ["/app/var/docker/ukc-launch.sh"]
+cmd: ["/ukc-launch.sh"]
