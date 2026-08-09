@@ -1,0 +1,9 @@
+spec: v0.7
+
+name: postiz-modules
+
+runtime: base-compat:latest
+
+rootfs: ./Dockerfile.rom
+
+cmd: ["/bin/true"]

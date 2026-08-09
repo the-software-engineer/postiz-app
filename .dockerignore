@@ -20,4 +20,5 @@ dist
 **/*.vscode
 .git
 .github
-reports
+reportsKraftfile*
+Dockerfile*

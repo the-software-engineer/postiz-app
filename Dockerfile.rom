@@ -27,12 +27,6 @@ RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm run build
 
 CMD ["sh", "-c", "nginx && pnpm run pm2"]
 
-# Unikraft initrd is a flat rootfs with a ~4GiB load ceiling: drop the build
-# toolchain and caches after the pnpm build so the image fits.
-RUN apt-get purge -y g++ make python3-pip \
- && apt-get autoremove -y \
- && rm -rf /root/.local/share/pnpm /root/.cache /app/.nx /var/lib/apt/lists/*
 
-# node_modules ships as a ROM (read-only image mounted at /app/node_modules);
-# the initrd must stay small because it loads into guest RAM.
-RUN rm -rf /app/node_modules && mkdir /app/node_modules
+FROM scratch
+COPY --from=builder /app/node_modules /
