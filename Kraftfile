@@ -7,4 +7,4 @@ runtime: base-compat:latest
 rootfs: ./Dockerfile.dev
 
 # Mirrors Dockerfile.dev CMD: nginx on 5000 fronting the pm2-supervised apps.
-cmd: ["/bin/sh", "-c", "nginx && pnpm run pm2"]
+cmd: ["/bin/sh", "-c", "cd /app && nginx && pnpm run pm2"]
