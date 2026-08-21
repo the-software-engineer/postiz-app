@@ -23,6 +23,40 @@ import { XDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/x.
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 
+const X_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const X_GIF_MAX_BYTES = 15 * 1024 * 1024;
+
+export async function prepareXImage(
+  imageBuffer: Buffer,
+  mediaType: string
+): Promise<Buffer> {
+  const maxBytes =
+    mediaType === 'image/gif' ? X_GIF_MAX_BYTES : X_IMAGE_MAX_BYTES;
+
+  if (imageBuffer.length <= maxBytes) {
+    return imageBuffer;
+  }
+
+  const pipeline = sharp(imageBuffer, {
+    animated: mediaType === 'image/gif',
+  }).resize({
+    width: 1000,
+    withoutEnlargement: true,
+  });
+
+  if (mediaType === 'image/jpeg') {
+    return pipeline.jpeg().toBuffer();
+  }
+  if (mediaType === 'image/png') {
+    return pipeline.png().toBuffer();
+  }
+  if (mediaType === 'image/webp') {
+    return pipeline.webp().toBuffer();
+  }
+
+  return pipeline.gif().toBuffer();
+}
+
 @Rules(
   `X can have maximum 4 pictures, or maximum one video, it can also be without attachments ${
     process.env.STRIP_LINKS_FROM_X_POSTS
@@ -425,22 +459,19 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       await Promise.all(
         postDetails.flatMap((p) =>
           p?.media?.flatMap(async (m) => {
+            const mediaType = lookup(m.path) || '';
             return {
               id: await this.runInConcurrent(
                 async () =>
                   client.v2.uploadMedia(
                     hasExtension(m.path, 'mp4')
                       ? Buffer.from(await readOrFetch(m.path))
-                      : await sharp(await readOrFetch(m.path), {
-                          animated: lookup(m.path) === 'image/gif',
-                        })
-                          .resize({
-                            width: 1000,
-                          })
-                          .gif()
-                          .toBuffer(),
+                      : await prepareXImage(
+                          Buffer.from(await readOrFetch(m.path)),
+                          mediaType
+                        ),
                     {
-                      media_type: (lookup(m.path) || '') as any,
+                      media_type: mediaType as any,
                     }
                   ),
                 true
