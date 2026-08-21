@@ -33,33 +33,35 @@ import { toShortBlueskyUrl } from '@gitroom/helpers/utils/count.length';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { hasExtension } from '@gitroom/helpers/utils/has.extension';
 
-async function reduceImageBySize(url: string, maxSizeKB = 976) {
+const BLUESKY_IMAGE_MAX_BYTES = 2_000_000;
+
+export async function reduceImageBufferBySize(
+  originalBuffer: Buffer,
+  maxSizeBytes = BLUESKY_IMAGE_MAX_BYTES
+) {
+  const metadata = await sharp(originalBuffer).metadata();
+  let width = metadata.width!;
+  let height = metadata.height!;
+  let imageBuffer = originalBuffer;
+
+  while (imageBuffer.length > maxSizeBytes) {
+    width = Math.floor(width * 0.9);
+    height = Math.floor(height * 0.9);
+
+    imageBuffer = await sharp(originalBuffer)
+      .resize({ width, height })
+      .toBuffer();
+
+    if (width < 10 || height < 10) break;
+  }
+
+  return { width, height, buffer: imageBuffer };
+}
+
+async function reduceImageBySize(url: string) {
   try {
-    // Fetch the image from the URL
     const response = await axios.get(url, { responseType: 'arraybuffer' });
-    let imageBuffer = Buffer.from(response.data);
-
-    // Use sharp to get the metadata of the image
-    const metadata = await sharp(imageBuffer).metadata();
-    let width = metadata.width!;
-    let height = metadata.height!;
-
-    // Resize iteratively until the size is below the threshold
-    while (imageBuffer.length / 1024 > maxSizeKB) {
-      width = Math.floor(width * 0.9); // Reduce dimensions by 10%
-      height = Math.floor(height * 0.9);
-
-      // Resize the image
-      const resizedBuffer = await sharp(imageBuffer)
-        .resize({ width, height })
-        .toBuffer();
-
-      imageBuffer = resizedBuffer;
-
-      if (width < 10 || height < 10) break; // Prevent overly small dimensions
-    }
-
-    return { width, height, buffer: imageBuffer };
+    return reduceImageBufferBySize(Buffer.from(response.data));
   } catch (error) {
     console.error('Error processing image:', error);
     throw error;
