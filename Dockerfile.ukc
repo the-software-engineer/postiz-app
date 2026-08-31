@@ -1,3 +1,10 @@
+# tailscaled joins this instance to the tailnet (TSE-690 phase 3). Static Go
+# binaries copied out of the official image rather than installed from a repo:
+# they are self-contained, and this keeps the tailscale version pinned in one
+# place instead of drifting with Debian's package index.
+ARG TAILSCALE_VERSION=v1.90.6
+FROM tailscale/tailscale:${TAILSCALE_VERSION} AS tailscale
+
 FROM node:22.20-bookworm-slim AS builder
 ARG NEXT_PUBLIC_VERSION
 ENV NEXT_PUBLIC_VERSION=$NEXT_PUBLIC_VERSION
@@ -39,8 +46,178 @@ RUN rm -rf /app/node_modules && mkdir /app/node_modules
 
 # socat tunnels plaintext gRPC (h2c) out to temporal's TLS service: the LB
 # terminates TLS but offers no h2 ALPN, which the temporal SDK client insists on.
-RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf /var/lib/apt/lists/*
+#
+# curl and ca-certificates are for the wrapper's health poll and for tailscaled's
+# TLS to the control plane. node:22-bookworm-slim purges curl after installing
+# node, so it is genuinely absent without this line.
+RUN apt-get update && apt-get install -y --no-install-recommends socat curl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=tailscale /usr/local/bin/tailscaled /usr/local/bin/tailscaled
+COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscale
 
 # Launcher lives here, not in the build context: editing it must not invalidate
-# the COPY layer above. ROM with node_modules attaches as /dev/ukp_rom1.
-RUN printf '#!/bin/sh\nset -e\nmount -t erofs -o ro /dev/ukp_rom1 /app/node_modules\nsocat TCP-LISTEN:7233,bind=127.0.0.1,fork,reuseaddr OPENSSL:postiz-temporal.sfo.unikraft.app:7233,verify=0 &\ncd /app\nnginx\nexec pnpm run pm2\n' > /ukc-launch.sh && chmod 755 /ukc-launch.sh
+# the COPY layer above, which would cost a full pnpm install + build every time
+# the wrapper is touched. ROM with node_modules attaches as /dev/ukp_rom1.
+#
+# It is PID 1 and it supervises three things now:
+#
+#   tailscaled  userspace networking, state on the volume at $TS_STATE_DIR.
+#               This is how the-newsroom reaches the public API since TSE-690
+#               phase 3, instead of over the internet through Cloudflare Access.
+#   socat       the temporal gRPC tunnel, unchanged
+#   the app     nginx on 5000 in front of pm2 (frontend 4200, backend 3000,
+#               orchestrator). Still the foreground process, so the instance's
+#               restart policy still means what it used to: if the app dies,
+#               PID 1 dies and the platform restarts the instance.
+#
+# tailscaled is deliberately NOT allowed to be the reason postiz fails to boot.
+# A spent or malformed auth key logs and moves on; the dashboard, the scheduler
+# and the public path through Cloudflare all work without a tailnet.
+RUN cat > /ukc-launch.sh <<'LAUNCH'
+#!/bin/sh
+set -eu
+
+log() { echo "[wrapper] $*"; }
+
+TS_STATE_DIR="${TS_STATE_DIR:-/var/lib/tailscale}"
+TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
+TS_HOSTNAME="${TS_HOSTNAME:-postiz}"
+# An OAuth-client-secret auth key registers with no tags of its own, so the node
+# has to advertise the tag itself. A pre-tagged tskey-auth-... key is the
+# opposite case and rejects the flag, so set TS_TAGS empty for one of those.
+TS_TAGS="${TS_TAGS-tag:postiz}"
+TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
+TEMPORAL_TLS_TARGET="${TEMPORAL_TLS_TARGET:-postiz-temporal.sfo.unikraft.app:7233}"
+# 401 is the healthy answer: it proves nginx on 5000 and the backend on 3000 are
+# both up and the public API guard is running. A 200 would need a credential.
+HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:5000/api/public/v1/integrations}"
+LOCAL_DEV="${LOCAL_DEV:-0}"
+
+# --- node_modules -----------------------------------------------------------
+# It ships as a ROM because the initrd loads into guest RAM and 3.1 GiB of
+# modules does not fit under the ceiling.
+if [ "${LOCAL_DEV}" != '1' ]; then
+	mount -t erofs -o ro /dev/ukp_rom1 /app/node_modules
+fi
+
+# --- temporal ---------------------------------------------------------------
+socat TCP-LISTEN:7233,bind=127.0.0.1,fork,reuseaddr "OPENSSL:${TEMPORAL_TLS_TARGET},verify=0" &
+log "socat temporal tunnel -> ${TEMPORAL_TLS_TARGET}"
+
+# --- tailscale --------------------------------------------------------------
+# Userspace networking: no TUN device needed, and the netstack auto-forwards
+# inbound tailnet TCP to 127.0.0.1 on the same port. So nginx on 5000 is
+# reachable at postiz.tailc7f718.ts.net:5000 with no `tailscale serve` and no
+# proxy in front of it.
+#
+# --socks5-server is what an OUTBOUND tailnet call would need; the host has no
+# route to 100.64.0.0/10 of its own. postiz makes none today (it is a callee,
+# and it has no outbound grant in policy.hujson), so the proxy is unused. If one
+# is ever needed, extend the socat line above rather than adding a second
+# forwarder: socat can dial through a SOCKS5 proxy.
+join_tailnet() {
+	i=0
+	while [ "$i" -lt 30 ]; do
+		if /usr/local/bin/tailscale --socket="${TS_SOCKET}" status >/dev/null 2>&1; then break; fi
+		i=$((i + 1))
+		sleep 1
+	done
+
+	set -- --authkey="${TS_AUTHKEY:-}" --hostname="${TS_HOSTNAME}" \
+		--accept-dns=false --accept-routes=false
+	if [ -n "${TS_TAGS:-}" ]; then
+		set -- "$@" --advertise-tags="${TS_TAGS}"
+	fi
+
+	attempt=1
+	backoff=3
+	while [ "$attempt" -le 4 ]; do
+		log "tailscale up attempt ${attempt}/4"
+		# Bounded by `timeout`: an unwrapped `tailscale up` against a bad key
+		# retries internally instead of returning, which wedges boot with no
+		# diagnostics (measured on fra, 2026-08-28, TSE-690 phase 2a).
+		if timeout 20s /usr/local/bin/tailscale --socket="${TS_SOCKET}" up "$@" 2>&1; then
+			log 'tailnet joined'
+			_ip=$(timeout 10s /usr/local/bin/tailscale --socket="${TS_SOCKET}" ip -4 2>/dev/null | head -1 || true)
+			log "tailnet ip ${_ip:-unknown}"
+			return 0
+		fi
+		log "tailscale up attempt ${attempt}/4 failed"
+		attempt=$((attempt + 1))
+		if [ "$attempt" -le 4 ]; then
+			sleep "$backoff"
+		fi
+		backoff=$((backoff * 2))
+	done
+	log 'tailscale up did not succeed after all attempts; the daemon stays up and retries on its own'
+	return 0
+}
+
+# Restart the daemon if it dies. The tailnet is the only path the-newsroom has
+# to the public API, so losing it silently until the next instance restart is
+# not acceptable; five exits in a minute is a crash loop, so stop hammering.
+run_tailscaled() {
+	# HOME only for this subshell: tailscaled writes a log-policy file under
+	# $HOME/.cache and the rest of the stack must not have its HOME moved.
+	export HOME="${TS_STATE_DIR}"
+	mkdir -p "${TS_STATE_DIR}"
+	failures=0
+	window_start=$(date +%s)
+	while :; do
+		/usr/local/bin/tailscaled \
+			--tun=userspace-networking \
+			--statedir="${TS_STATE_DIR}" \
+			--socket="${TS_SOCKET}" \
+			--socks5-server="127.0.0.1:${TS_SOCKS5_PORT}" &
+		daemon=$!
+		if [ -n "${TS_AUTHKEY:-}" ]; then
+			join_tailnet &
+		else
+			# With state already on the volume the daemon reconnects on its own;
+			# `tailscale up` is only needed to consume an auth key.
+			log 'TS_AUTHKEY not set: relying on saved node state, not joining'
+		fi
+		wait "${daemon}" || true
+		now=$(date +%s)
+		if [ $((now - window_start)) -gt 60 ]; then
+			failures=0
+			window_start="${now}"
+		fi
+		failures=$((failures + 1))
+		if [ "${failures}" -ge 5 ]; then
+			log 'tailscaled exited 5 times in under a minute; giving up on the tailnet'
+			return 1
+		fi
+		log "tailscaled exited, restarting (${failures} in this window)"
+		sleep 2
+	done
+}
+
+run_tailscaled &
+log "tailscaled starting (${TS_HOSTNAME}${TS_TAGS:+ as ${TS_TAGS}})"
+
+# --- health -----------------------------------------------------------------
+# The greppable line a deploy waits for. `state: running` is not a health
+# signal on this platform: PID 1 outliving an OOM-killed child still reports it.
+wait_healthy() {
+	i=0
+	while [ "$i" -lt 150 ]; do
+		code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${HEALTH_URL}" 2>/dev/null || true)
+		if [ "${code}" = '401' ] || [ "${code}" = '200' ]; then
+			log 'healthy'
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 2
+	done
+	log 'postiz did not answer on 5000 within 300s of boot'
+}
+wait_healthy &
+
+# --- the app ----------------------------------------------------------------
+cd /app
+nginx
+exec pnpm run pm2
+LAUNCH
+
+RUN chmod 755 /ukc-launch.sh && sh -n /ukc-launch.sh
