@@ -44,8 +44,11 @@ RUN apt-get purge -y g++ make python3-pip \
 # the initrd must stay small because it loads into guest RAM.
 RUN rm -rf /app/node_modules && mkdir /app/node_modules
 
-# socat tunnels plaintext gRPC (h2c) out to temporal's TLS service: the LB
-# terminates TLS but offers no h2 ALPN, which the temporal SDK client insists on.
+# socat is the loopback forwarder for every backend leg. Today it tunnels
+# plaintext gRPC (h2c) out to temporal's TLS service, because the LB terminates
+# TLS but offers no h2 ALPN, which the temporal SDK client insists on. Since
+# TSE-690's port-closure extension it also carries the Postgres, Redis and
+# Temporal legs over the tailnet instead — see the wrapper for the switch.
 #
 # curl and ca-certificates are for the wrapper's health poll and for tailscaled's
 # TLS to the control plane. node:22-bookworm-slim purges curl after installing
@@ -64,11 +67,31 @@ COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscale
 #   tailscaled  userspace networking, state on the volume at $TS_STATE_DIR.
 #               This is how the-newsroom reaches the public API since TSE-690
 #               phase 3, instead of over the internet through Cloudflare Access.
-#   socat       the temporal gRPC tunnel, unchanged
+#   forwarders  one loopback listener per backend leg: Postgres, Redis and
+#               Temporal. Each is independently switchable between the public
+#               FQDN and the tailnet, which is what lets the data tier be cut
+#               over one backend at a time instead of all three at once.
 #   the app     nginx on 5000 in front of pm2 (frontend 4200, backend 3000,
 #               orchestrator). Still the foreground process, so the instance's
 #               restart policy still means what it used to: if the app dies,
 #               PID 1 dies and the platform restarts the instance.
+#
+# WHY THE FORWARDERS DRIVE `tailscale nc` RATHER THAN A SOCKS5 ADDRESS.
+# Outbound does not just work in userspace mode: the netstack auto-forwards
+# INBOUND tailnet TCP to loopback, but the host has no route to 100.64.0.0/10.
+# tailscaled runs a SOCKS5 proxy on request (--socks5-server, passed below) and
+# the estate's plan was socat through it — except socat 1.7.4.4, what Debian
+# bookworm ships, has WITH_SOCKS4 and WITH_SOCKS4A compiled in and NO SOCKS5 at
+# all (checked with `socat -V`; SOCKS5 arrived in socat 1.8.0). tailscaled
+# speaks only SOCKS5. `tailscale nc <host> <port>` pipes a tailnet connection to
+# stdin/stdout through the daemon we already run, so socat's EXEC address gets
+# us there with nothing added to the image. Cost: one short-lived process per
+# connection, fine for pooled clients (Prisma, ioredis, one gRPC channel).
+#
+# TS_TUN=tailscale0 would delete all three forwarders: a real TUN device gives
+# the kernel a route to 100.x and every client dials tailnet names unmodified.
+# Nothing in the estate has measured it. Try it while the public ports are still
+# up, where a failure costs nothing.
 #
 # tailscaled is deliberately NOT allowed to be the reason postiz fails to boot.
 # A spent or malformed auth key logs and moves on; the dashboard, the scheduler
@@ -88,6 +111,33 @@ TS_HOSTNAME="${TS_HOSTNAME:-postiz}"
 TS_TAGS="${TS_TAGS-tag:postiz}"
 TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
 TEMPORAL_TLS_TARGET="${TEMPORAL_TLS_TARGET:-postiz-temporal.sfo.unikraft.app:7233}"
+# Tailnet peer names for the three backend legs. EMPTY means "leave this leg on
+# the public FQDN", which is the state before the cutover and the state to
+# revert to if one leg misbehaves. Setting one moves that leg and nothing else.
+#
+# Each also decides how its client must be configured, and getting it wrong
+# fails closed at connect time rather than degrading quietly:
+#
+#   PG_FORWARD_TO       DATABASE_URL host becomes 127.0.0.1 and sslmode MUST
+#                       become `disable`. postiz-db has no TLS compiled in; the
+#                       public FQDN only appears to offer it because the load
+#                       balancer terminates. `require` over the forwarder gets
+#                       "server does not support SSL, but SSL was required".
+#   REDIS_FORWARD_TO    REDIS_URL becomes `redis://` (NOT `rediss://`) on
+#                       127.0.0.1, for exactly the same reason — and the SNI
+#                       workaround this stack needed for the public leg stops
+#                       applying, because there is no TLS to name a server for.
+#   TEMPORAL_FORWARD_TO replaces the socat TLS tunnel rather than joining it:
+#                       both would bind 7233. TEMPORAL_ADDRESS stays
+#                       localhost:7233 either way, which is why this leg is the
+#                       one that changes nothing on the client side and can go
+#                       last.
+PG_FORWARD_TO="${PG_FORWARD_TO:-}"
+PG_FORWARD_PORT="${PG_FORWARD_PORT:-5432}"
+REDIS_FORWARD_TO="${REDIS_FORWARD_TO:-}"
+REDIS_FORWARD_PORT="${REDIS_FORWARD_PORT:-6379}"
+TEMPORAL_FORWARD_TO="${TEMPORAL_FORWARD_TO:-}"
+TEMPORAL_FORWARD_PORT="${TEMPORAL_FORWARD_PORT:-7233}"
 # 401 is the healthy answer: it proves nginx on 5000 and the backend on 3000 are
 # both up and the public API guard is running. A 200 would need a credential.
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:5000/api/public/v1/integrations}"
@@ -100,9 +150,29 @@ if [ "${LOCAL_DEV}" != '1' ]; then
 	mount -t erofs -o ro /dev/ukp_rom1 /app/node_modules
 fi
 
-# --- temporal ---------------------------------------------------------------
-socat TCP-LISTEN:7233,bind=127.0.0.1,fork,reuseaddr "OPENSSL:${TEMPORAL_TLS_TARGET},verify=0" &
-log "socat temporal tunnel -> ${TEMPORAL_TLS_TARGET}"
+# --- backend legs -----------------------------------------------------------
+# One loopback listener per backend. `tailnet_forward` is the tailnet version;
+# the temporal TLS tunnel is the public-FQDN version, and they are mutually
+# exclusive on port 7233.
+tailnet_forward() {
+	_name="$1"; _peer="$2"; _port="$3"
+	socat "TCP-LISTEN:${_port},bind=127.0.0.1,fork,reuseaddr" \
+		"EXEC:/usr/local/bin/tailscale --socket=${TS_SOCKET} nc ${_peer} ${_port}" &
+	log "${_name} forwarder 127.0.0.1:${_port} -> ${_peer}:${_port} over the tailnet"
+}
+
+if [ -n "${PG_FORWARD_TO}" ]; then
+	tailnet_forward postgres "${PG_FORWARD_TO}" "${PG_FORWARD_PORT}"
+fi
+if [ -n "${REDIS_FORWARD_TO}" ]; then
+	tailnet_forward redis "${REDIS_FORWARD_TO}" "${REDIS_FORWARD_PORT}"
+fi
+if [ -n "${TEMPORAL_FORWARD_TO}" ]; then
+	tailnet_forward temporal "${TEMPORAL_FORWARD_TO}" "${TEMPORAL_FORWARD_PORT}"
+else
+	socat TCP-LISTEN:7233,bind=127.0.0.1,fork,reuseaddr "OPENSSL:${TEMPORAL_TLS_TARGET},verify=0" &
+	log "socat temporal TLS tunnel -> ${TEMPORAL_TLS_TARGET} (public FQDN; set TEMPORAL_FORWARD_TO to move it to the tailnet)"
+fi
 
 # --- tailscale --------------------------------------------------------------
 # Userspace networking: no TUN device needed, and the netstack auto-forwards
