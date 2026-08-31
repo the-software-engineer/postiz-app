@@ -221,7 +221,7 @@ fi
 # --- tailscale --------------------------------------------------------------
 # Userspace networking: no TUN device needed, and the netstack auto-forwards
 # inbound tailnet TCP to 127.0.0.1 on the same port. So nginx on 5000 is
-# reachable at postiz.tailc7f718.ts.net:5000 with no `tailscale serve` and no
+# reachable at <node>.<tailnet>.ts.net:5000 with no `tailscale serve` and no
 # proxy in front of it.
 #
 # --socks5-server is what an OUTBOUND tailnet call would need; the host has no
