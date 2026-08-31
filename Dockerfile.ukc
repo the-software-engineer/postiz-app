@@ -90,8 +90,22 @@ COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscale
 #
 # TS_TUN=tailscale0 would delete all three forwarders: a real TUN device gives
 # the kernel a route to 100.x and every client dials tailnet names unmodified.
-# Nothing in the estate has measured it. Try it while the public ports are still
-# up, where a failure costs nothing.
+#
+# MEASURED 2026-08-31 on postiz-temporal, and it is NOT a drop-in win. The TUN
+# device does come up and outbound works — temporal read its Postgres over a
+# 100.x address with no forwarder. But temporal's own gRPC frontend then never
+# bound 7233 (the platform's service list for the instance dropped to
+# `udp:36093`), which took the whole postiz backend down with it, because the
+# backend refuses to start without Temporal. Reverting to userspace-networking
+# restored it immediately.
+#
+# There is a second, sharper edge, and it will bite anything that keeps a
+# loopback forwarder: WITH TUN THE NODE GAINS IPv6, AND `localhost` STARTS
+# RESOLVING TO ::1 FIRST. Every listener bound to 127.0.0.1 — socat here, and
+# nginx's upstreams — becomes unreachable by name. The symptom is
+# `connect ECONNREFUSED ::1:7233`. Pin such clients to 127.0.0.1 explicitly.
+#
+# So TUN stays off by default and the forwarders below are the supported path.
 #
 # tailscaled is deliberately NOT allowed to be the reason postiz fails to boot.
 # A spent or malformed auth key logs and moves on; the dashboard, the scheduler
@@ -110,7 +124,25 @@ TS_HOSTNAME="${TS_HOSTNAME:-postiz}"
 # opposite case and rejects the flag, so set TS_TAGS empty for one of those.
 TS_TAGS="${TS_TAGS-tag:postiz}"
 TS_SOCKS5_PORT="${TS_SOCKS5_PORT:-1055}"
-TEMPORAL_TLS_TARGET="${TEMPORAL_TLS_TARGET:-postiz-temporal.sfo.unikraft.app:7233}"
+# userspace-networking (default) or tailscale0 for a real TUN device.
+#
+# MEASURED 2026-08-31 on postiz-temporal in sfo: tailscale0 works. The interface
+# comes up with its tailnet address and an ordinary client in the instance dials
+# a tailnet peer unmodified - temporal reached postiz-db at its 100.x address
+# with no forwarder and no SOCKS5. One health warning is expected and harmless:
+# `router: create table: ... socket: protocol not supported`, netlink route-table
+# enumeration failing on this trimmed kernel, which does not stop the interface
+# working.
+#
+# That is what lets DATABASE_URL, REDIS_URL and TEMPORAL_ADDRESS name tailnet
+# addresses directly. The forwarders below stay as the documented fallback for
+# userspace mode; with TUN none of them is set.
+TS_TUN="${TS_TUN:-userspace-networking}"
+# The legacy socat TLS tunnel to temporal's PUBLIC service. Set it EMPTY to turn
+# the tunnel off - which is what a tailnet TEMPORAL_ADDRESS wants, since the
+# tunnel would otherwise sit on 7233 and shadow it. Note `-` not `:-`, so an
+# explicit empty value is honoured.
+TEMPORAL_TLS_TARGET="${TEMPORAL_TLS_TARGET-postiz-temporal.sfo.unikraft.app:7233}"
 # Tailnet peer names for the three backend legs. EMPTY means "leave this leg on
 # the public FQDN", which is the state before the cutover and the state to
 # revert to if one leg misbehaves. Setting one moves that leg and nothing else.
@@ -138,9 +170,19 @@ REDIS_FORWARD_TO="${REDIS_FORWARD_TO:-}"
 REDIS_FORWARD_PORT="${REDIS_FORWARD_PORT:-6379}"
 TEMPORAL_FORWARD_TO="${TEMPORAL_FORWARD_TO:-}"
 TEMPORAL_FORWARD_PORT="${TEMPORAL_FORWARD_PORT:-7233}"
-# 401 is the healthy answer: it proves nginx on 5000 and the backend on 3000 are
-# both up and the public API guard is running. A 200 would need a credential.
-HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:5000/api/public/v1/integrations}"
+# 401 is the healthy answer: it proves the backend is up and the public API guard
+# is running. A 200 would need a credential.
+#
+# IT POINTS AT THE BACKEND ON 3000, NOT AT NGINX ON 5000, AND THAT MATTERS MORE
+# THAN IT LOOKS. Polling nginx while the backend is still starting makes nginx
+# log two "connect() failed ... upstream" lines PER ATTEMPT. At one attempt every
+# two seconds for five minutes that is ~300 lines, and the platform's log API
+# returns only the last ~5KB — so the health poll reliably evicts the boot output
+# of the thing it is waiting for. That cost real time on 2026-08-31: the backend
+# was failing with a clear error and the error had already scrolled away every
+# time it was looked for. Polling 3000 directly fails with connection-refused,
+# which nginx never sees and never logs.
+HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3000/public/v1/integrations}"
 LOCAL_DEV="${LOCAL_DEV:-0}"
 
 # --- node_modules -----------------------------------------------------------
@@ -169,9 +211,11 @@ if [ -n "${REDIS_FORWARD_TO}" ]; then
 fi
 if [ -n "${TEMPORAL_FORWARD_TO}" ]; then
 	tailnet_forward temporal "${TEMPORAL_FORWARD_TO}" "${TEMPORAL_FORWARD_PORT}"
-else
+elif [ -n "${TEMPORAL_TLS_TARGET}" ]; then
 	socat TCP-LISTEN:7233,bind=127.0.0.1,fork,reuseaddr "OPENSSL:${TEMPORAL_TLS_TARGET},verify=0" &
-	log "socat temporal TLS tunnel -> ${TEMPORAL_TLS_TARGET} (public FQDN; set TEMPORAL_FORWARD_TO to move it to the tailnet)"
+	log "socat temporal TLS tunnel -> ${TEMPORAL_TLS_TARGET} (public FQDN)"
+else
+	log 'no temporal tunnel: TEMPORAL_ADDRESS names a reachable host directly'
 fi
 
 # --- tailscale --------------------------------------------------------------
@@ -235,7 +279,7 @@ run_tailscaled() {
 	window_start=$(date +%s)
 	while :; do
 		/usr/local/bin/tailscaled \
-			--tun=userspace-networking \
+			--tun="${TS_TUN}" \
 			--statedir="${TS_STATE_DIR}" \
 			--socket="${TS_SOCKET}" \
 			--socks5-server="127.0.0.1:${TS_SOCKS5_PORT}" &
