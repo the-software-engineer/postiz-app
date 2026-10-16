@@ -1,0 +1,4 @@
+metro: sfo
+name: postiz-app
+image: tgregory/postiz-rootfs
+memory: 5120

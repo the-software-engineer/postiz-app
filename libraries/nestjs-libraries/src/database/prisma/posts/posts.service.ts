@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  ConflictException,
+  NotFoundException,
   Injectable,
   ValidationPipe,
 } from '@nestjs/common';
@@ -323,6 +325,83 @@ export class PostsService {
           )
         : []),
     ];
+  }
+
+  async thread(orgId: string, id: string) {
+    const posts = await this.getPostsRecursively(id, true, orgId, true);
+    const root = posts[0];
+    if (!root || root.parentPostId)
+      throw new NotFoundException('Thread not found');
+    const parts = posts.map((p) => ({
+      id: p.id,
+      published: Boolean(p.releaseId && p.releaseId !== 'missing'),
+      release_id: p.releaseId === 'missing' ? null : p.releaseId,
+      release_url: p.releaseURL,
+    }));
+    const complete = parts.every((p) => p.published);
+    let running = false;
+    if (!complete) {
+      for await (const execution of this._temporalService.client
+        .getRawClient()
+        .workflow.list({
+          query: `postId="${root.id}" AND ExecutionStatus="Running"`,
+        })) {
+        running = true;
+        break;
+      }
+    }
+    const state = complete
+      ? 'published'
+      : !running && root.state === 'ERROR'
+      ? 'failed'
+      : 'pending';
+    return {
+      id: root.id,
+      state,
+      can_resume:
+        state === 'failed' && parts[0].published && !root.intervalInDays,
+      parts,
+    };
+  }
+
+  async resumeThread(orgId: string, id: string) {
+    const thread = await this.thread(orgId, id);
+    if (thread.state === 'published') return thread;
+    if (!thread.can_resume)
+      throw new ConflictException('Thread cannot be resumed');
+    const client = this._temporalService.client.getRawClient();
+    for await (const execution of client.workflow.list({
+      query: `postId="${id}" AND ExecutionStatus="Running"`,
+    })) {
+      if (execution.workflowId !== `post_${id}_resume`) {
+        throw new ConflictException('Thread is still being published');
+      }
+    }
+    const root = await this._postRepository.getPostById(id, orgId);
+    const provider = this._integrationManager.getSocialIntegration(
+      root.integration.providerIdentifier
+    );
+    if (!provider.comment)
+      throw new BadRequestException('Channel cannot reply');
+    await client.workflow.start('resumeThreadWorkflow', {
+      workflowId: `post_${id}_resume`,
+      taskQueue: 'main',
+      workflowIdConflictPolicy: 'USE_EXISTING',
+      args: [
+        {
+          organizationId: orgId,
+          postId: id,
+          taskQueue: root.integration.providerIdentifier
+            .split('-')[0]
+            .toLowerCase(),
+        },
+      ],
+      typedSearchAttributes: new TypedSearchAttributes([
+        { key: postIdSearchParam, value: id },
+        { key: organizationId, value: orgId },
+      ]),
+    });
+    return { ...thread, state: 'pending', can_resume: false };
   }
 
   async getPosts(orgId: string, query: GetPostsDto) {

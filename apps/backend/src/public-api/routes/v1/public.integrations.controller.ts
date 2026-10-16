@@ -465,6 +465,19 @@ export class PublicIntegrationsController {
     };
   }
 
+  @Get('/posts/:id/thread')
+  thread(@GetOrgFromRequest() org: Organization, @Param('id') id: string) {
+    return this._postsService.thread(org.id, id);
+  }
+
+  @Post('/posts/:id/resume')
+  resumeThread(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._postsService.resumeThread(org.id, id);
+  }
+
   @Get('/posts/:id/missing')
   async getMissingContent(
     @GetOrgFromRequest() org: Organization,
