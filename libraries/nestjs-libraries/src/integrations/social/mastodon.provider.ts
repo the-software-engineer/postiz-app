@@ -8,12 +8,14 @@ import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import dayjs from 'dayjs';
+import { MastodonSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/mastodon.dto';
 import { Integration } from '@prisma/client';
 import { number, string } from 'yup';
 
 export class MastodonProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 5; // Mastodon instances typically have generous limits
   identifier = 'mastodon';
+  dto = MastodonSettingsDto;
   name = 'Mastodon';
   isBetweenSteps = false;
   scopes = ['write:statuses', 'profile', 'write:media'];
@@ -176,7 +178,7 @@ export class MastodonProvider extends SocialAbstract implements SocialProvider {
 
     const form = new FormData();
     form.append('status', firstPost.message);
-    form.append('visibility', 'public');
+    form.append('visibility', firstPost.settings?.visibility || 'public');
     if (uploadFiles.length) {
       for (const file of uploadFiles) {
         form.append('media_ids[]', file);
@@ -188,6 +190,7 @@ export class MastodonProvider extends SocialAbstract implements SocialProvider {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
+          'Idempotency-Key': `postiz:${firstPost.id}`,
         },
         body: form,
       })
@@ -222,7 +225,7 @@ export class MastodonProvider extends SocialAbstract implements SocialProvider {
 
     const form = new FormData();
     form.append('status', commentPost.message);
-    form.append('visibility', 'public');
+    form.append('visibility', commentPost.settings?.visibility || 'public');
     form.append('in_reply_to_id', replyToId);
     if (uploadFiles.length) {
       for (const file of uploadFiles) {
@@ -235,6 +238,7 @@ export class MastodonProvider extends SocialAbstract implements SocialProvider {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
+          'Idempotency-Key': `postiz:${commentPost.id}`,
         },
         body: form,
       })

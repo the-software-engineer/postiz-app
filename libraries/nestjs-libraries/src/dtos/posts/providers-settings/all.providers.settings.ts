@@ -12,6 +12,7 @@ import { TwitchDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settin
 import { InstagramDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/instagram.dto';
 import { LinkedinDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/linkedin.dto';
 import { IsIn } from 'class-validator';
+import { MastodonSettingsDto } from './mastodon.dto';
 import { MediumSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/medium.settings.dto';
 import { DevToSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/dev.to.settings.dto';
 import { HashnodeSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/hashnode.settings.dto';
@@ -52,7 +53,8 @@ export type AllProvidersSettings =
   | ProviderExtension<'facebook', FacebookDto>
   | ProviderExtension<'wrapcast', FarcasterDto>
   | ProviderExtension<'threads', None>
-  | ProviderExtension<'mastodon', None>
+  | ProviderExtension<'mastodon', MastodonSettingsDto>
+  | ProviderExtension<'mastodon-custom', MastodonSettingsDto>
   | ProviderExtension<'bluesky', None>
   | ProviderExtension<'telegram', None>
   | ProviderExtension<'nostr', None>
@@ -91,7 +93,8 @@ export const allProviders = (setEmpty?: any) => {
     { value: FarcasterDto, name: 'wrapcast' },
     { value: FacebookDto, name: 'facebook' },
     { value: setEmpty, name: 'threads' },
-    { value: setEmpty, name: 'mastodon' },
+    { value: MastodonSettingsDto, name: 'mastodon' },
+    { value: MastodonSettingsDto, name: 'mastodon-custom' },
     { value: setEmpty, name: 'bluesky' },
     { value: setEmpty, name: 'telegram' },
     { value: setEmpty, name: 'nostr' },
