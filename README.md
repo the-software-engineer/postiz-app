@@ -145,18 +145,19 @@ This repository's source code is available under the [AGPL-3.0 license](LICENSE)
 ## TSE deployment
 
 The deployed source branch is `unikraft-deploy`. After changes pass the Build
-workflow, merge to that branch. The rootfs workflow publishes a linux/amd64 OCI
-image at `index.unikraft.io/tgregory/postiz-rootfs:sha-<commit>`. It checks
-registry capacity before building and never prunes images. If the registry check
-refuses the build, stop and resolve capacity separately.
+workflow, merge to that branch. Run the rootfs workflow in private `tse/postiz`
+with the merged source commit. The public fork cannot use the private shared
+runner actions or deployment credentials.
 
-Pin that image by digest in `tse/postiz` (`ARG APP_IMAGE`), then merge that
-repo's PR to run its normal deployment workflow. The app reuses the existing
-modules ROM only when `pnpm-lock.yaml` and the Prisma schema are unchanged.
-A dependency or schema change also needs a matching modules ROM build.
+The workflow publishes a linux/amd64 OCI image at
+`index.unikraft.io/tgregory/postiz-rootfs:sha-<commit>`. Pin its digest in
+`tse/postiz` (`ARG APP_IMAGE`), then merge that repo's PR to deploy. The rootfs
+build checks registry capacity before building and never prunes images. If the
+registry check refuses it, stop and resolve capacity separately.
+
+The app reuses the existing modules ROM only when `pnpm-lock.yaml` and the
+Prisma schema are unchanged. A dependency or schema change also needs a
+matching modules ROM build.
 
 The [media thread contract](docs/media-threads.md) covers per-part receipts,
 resume and Mastodon visibility.
-
-`.github/rootfs-preflight.yaml` supplies only the registry check context. It is
-never passed to a deployment action; the runtime spec stays in `tse/postiz`.
