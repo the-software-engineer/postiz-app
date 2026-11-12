@@ -46,6 +46,41 @@ describe('countCharacters', () => {
     });
   });
 
+  describe.each(['mastodon', 'mastodon-custom'])('%s', (provider) => {
+    it.each(['https://a.co', url])('counts %s as 23 characters', (link) => {
+      expect(countCharacters(provider, link)).toBe(23);
+    });
+
+    it('counts each URL and keeps surrounding punctuation', () => {
+      expect(countCharacters(provider, `See (${url}), https://a.co.`)).toBe(55);
+    });
+
+    it('leaves non-URL text and bare domains unchanged', () => {
+      const text = 'hello 👍 example.com';
+      expect(countCharacters(provider, text)).toBe(text.length);
+    });
+
+    it.each(['gregory.sh', 'protectmysim.com'])(
+      'accepts 500 counted characters with 1 to 20 %s links',
+      (host) => {
+        const link = `https://${host}/z/nr1_${'a'.repeat(24)}`;
+        for (let n = 1; n <= 20; n++) {
+          const text = 'a'.repeat(500 - 24 * n) + ` ${link}`.repeat(n);
+          expect(text.length).toBe(500 + n * (link.length - 23));
+          expect(text.length).toBeGreaterThan(500);
+          expect(countCharacters(provider, text)).toBe(500);
+          expect(countCharacters(provider, text + '\n')).toBe(501);
+        }
+      }
+    );
+
+    it('rejects 501 counted characters even when raw length is below 500', () => {
+      const text = 'a'.repeat(477) + ' https://a.co';
+      expect(text.length).toBeLessThan(500);
+      expect(countCharacters(provider, text)).toBe(501);
+    });
+  });
+
   describe('linkedin and threads keep full URLs', () => {
     it('counts linkedin by raw length', () => {
       expect(countCharacters('linkedin', url)).toBe(url.length);
@@ -56,7 +91,7 @@ describe('countCharacters', () => {
     });
 
     it('counts an unknown provider by raw length', () => {
-      expect(countCharacters('mastodon', url)).toBe(url.length);
+      expect(countCharacters('unknown', url)).toBe(url.length);
     });
   });
 });
