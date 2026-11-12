@@ -101,7 +101,10 @@ export const countCharacters = (
     case 'mastodon-custom':
       return twitter
         .extractUrlsWithIndices(text, { extractUrlsWithoutProtocol: false })
-        .reduce((length, { url }) => length + 23 - url.length, text.length);
+        .reduce(
+          (length: number, { url }: { url: string }) => length + 23 - url.length,
+          text.length
+        );
     // LinkedIn, Threads and the rest keep full URLs, so raw length is correct
     default:
       return text.length;
